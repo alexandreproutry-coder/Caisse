@@ -1,9 +1,12 @@
 // Caisse Comptoir 360 – fonctionnement hors connexion
-const CACHE = "caisse-c360-v13";
-const FILES = ["./", "./index.html", "./manifest.webmanifest", "./icon-180.png", "./icon-192.png", "./icon-512.png"];
+const CACHE = "caisse-c360-v14";
+const FILES = ["./", "./index.html"];
+const EXTRAS = ["./manifest.webmanifest", "./icon-180.png", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(CACHE)
+    .then(c => c.addAll(FILES).then(() => Promise.all(EXTRAS.map(f => c.add(f).catch(() => {})))))
+    .then(() => self.skipWaiting()));
 });
 
 self.addEventListener("activate", e => {

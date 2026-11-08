@@ -757,6 +757,10 @@ function renderBilan(){
       <button class="btn dark" id="xsage" ${sel.length?"":"disabled"}>Export Sage (par jour et par règlement)</button>
       <button class="btn line" id="xcsv" ${sel.length?"":"disabled"}>Export détaillé (ticket par ticket)</button>
     </div>
+    <div class="card" style="margin-top:14px"><h3>Transférer vers un autre appareil</h3>
+      <p class="muted" style="margin:0 0 10px;font-size:14px">Envoie toute la caisse (produits, stock, ventes, fond de caisse, tickets en attente) vers un autre téléphone ou une tablette, par AirDrop, même sans Internet. Sur l'autre appareil, touchez « Recevoir ».</p>
+      <div class="exports" style="margin-top:0"><button class="btn dark" id="xsend">Envoyer la caisse</button><label class="btn line" style="display:flex;align-items:center;justify-content:center;cursor:pointer;flex:1;min-width:180px">Recevoir une caisse<input type="file" id="xrecv" accept=".json,application/json,text/plain" hidden></label></div>
+    </div>
     <p class="muted" style="margin-top:14px;font-size:14px">${db?(syncState==="ok"?"Les ventes de tous les appareils connectés apparaissent ici.":"Les ventes sont gardées sur cet appareil et partiront dès le retour de la connexion."):"Les ventes sont enregistrées sur cet appareil, même sans Internet. Exportez le bilan en fin de journée."}</p>`;
   const adj=(id,d)=>{const p=config.produits.find(x=>x.id===id);if(!p||p.stock==null)return;if(p.stock+d<0)return;p.stock+=d;logMvt(p,d,"ajustement");pushConfig();renderBilan();renderGrid()};
   w.querySelectorAll("[data-sset]").forEach(b=>b.onclick=()=>openStockSet(b.dataset.sset));
@@ -769,14 +773,52 @@ function renderBilan(){
   w.querySelectorAll("[data-j]").forEach(b=>b.onclick=()=>{bilanJour=b.dataset.j;renderBilan()});
   w.querySelectorAll("[data-fix]").forEach(b=>b.onclick=()=>openSaleFix(b.dataset.fix));
   const per=bilanJour==="all"?"toutes":bilanJour==="today"?today:bilanJour;
+  $("#xsend").onclick=sendCaisse;
+  $("#xrecv").onchange=e=>{const f=e.target.files&&e.target.files[0];e.target.value="";if(f)receiveCaisse(f)};
   $("#xsage").onclick=()=>exportFile(`sage-${per}.csv`,buildSageCsv(sel));
   $("#xcsv").onclick=()=>exportFile(`ventes-detail-${per}.csv`,buildCsv(sel));
 }
-async function exportFile(name,body){
-  const text="\ufeff"+body;
+/* ---------- transfert entre appareils ---------- */
+function sendCaisse(){
+  const data={app:"caisse-comptoir360",version:1,envoyeLe:Date.now(),config,ventes,attente,dernierTicket:Math.max(LS.get("c360_dernierTicket",0),config.dernierTicket||0)};
+  const d=new Date(),stamp=dayKey(d)+"-"+String(d.getHours()).padStart(2,"0")+"h"+String(d.getMinutes()).padStart(2,"0");
+  exportFile(`caisse-comptoir360-${stamp}.json`,JSON.stringify(data),"application/json",true);
+}
+function receiveCaisse(file){
+  const r=new FileReader();
+  r.onerror=()=>toast("Fichier illisible");
+  r.onload=()=>{
+    let d;try{d=JSON.parse(String(r.result).replace(/^\ufeff/,""))}catch(e){d=null}
+    if(!d||d.app!=="caisse-comptoir360"||!d.config||typeof d.ventes!=="object"){openModal(`<h2 class="mt">Fichier non reconnu</h2><p class="sub">Choisissez le fichier « caisse-comptoir360-… .json » envoyé depuis l'autre appareil.</p><button class="btn" data-close>Fermer</button>`);return}
+    const nv=Object.values(d.ventes||{}).filter(v=>v&&v.id),np=(d.config.produits||[]).length;
+    const ici=Object.keys(ventes).length;
+    openModal(`<h2 class="mt">Recevoir cette caisse ?</h2>
+      <p class="sub">Envoyée le ${esc(new Date(+d.envoyeLe||0).toLocaleString("fr-FR",{weekday:"short",day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"}))}</p>
+      <div class="rendu idle" style="text-align:left;font-size:15px;color:var(--ink)">${np} produit(s) avec leur stock · ${nv.length} vente(s) · fond de caisse et réassorts</div>
+      <p class="sub" style="margin-top:12px">Les produits, le stock et le fond de caisse de cet appareil seront remplacés par ceux reçus.${ici?` Les ${ici} vente(s) déjà présentes ici sont conservées.`:""}</p>
+      <div class="two"><button class="btn" data-close>Annuler</button><button class="btn primary" id="rcok">Recevoir</button></div>`,s=>{
+      s.querySelector("#rcok").onclick=()=>{
+        const merged={...ventes};
+        nv.forEach(v=>{const cur=merged[v.id];if(!cur||(+v.corrige||0)>=(+cur.corrige||0))merged[v.id]=v});
+        ventes=merged;
+        config=normalizeConfig(d.config);
+        const hw=Math.max(+d.dernierTicket||0,config.dernierTicket||0,LS.get("c360_dernierTicket",0),...Object.values(ventes).map(v=>+v.numero||0));
+        config.dernierTicket=hw;LS.set("c360_dernierTicket",hw);
+        if(Array.isArray(d.attente))attente=d.attente.filter(a=>a&&a.id&&Array.isArray(a.items));saveAttente();
+        Object.keys(ventes).forEach(id=>{if(!pending.includes(id))pending.push(id)});
+        saveLocal();pushConfig();closeModal();renderAll();toast("Caisse reçue");
+      };
+    });
+  };
+  r.readAsText(file);
+}
+
+async function exportFile(name,body,type,noBom){
+  type=type||"text/csv";
+  const text=(noBom?"":"\ufeff")+body;
   if(dl){try{await dl.save({filename:name,data:text});return}catch(e){}}
-  try{const file=new File([text],name,{type:"text/csv"});if(navigator.canShare&&navigator.canShare({files:[file]})){await navigator.share({files:[file],title:"Ventes Comptoir 360"});return}}catch(e){if(e&&e.name==="AbortError")return}
-  try{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([text],{type:"text/csv"}));a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},2000);return}catch(e){}
+  try{const file=new File([text],name,{type});if(navigator.canShare&&navigator.canShare({files:[file]})){await navigator.share({files:[file],title:"Caisse Comptoir 360"});return}}catch(e){if(e&&e.name==="AbortError")return}
+  try{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([text],{type}));a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},2000);return}catch(e){}
   showCsv(body);
 }
 function stockCard(){
