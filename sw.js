@@ -1,5 +1,5 @@
 // Caisse Comptoir 360 – fonctionnement hors connexion
-const CACHE = "caisse-c360-v14";
+const CACHE = "caisse-c360-v15";
 const FILES = ["./", "./index.html"];
 const EXTRAS = ["./manifest.webmanifest", "./icon-180.png", "./icon-192.png", "./icon-512.png"];
 
@@ -17,6 +17,11 @@ self.addEventListener("activate", e => {
 // puis mise à jour discrète en arrière-plan quand Internet est là.
 self.addEventListener("fetch", e => {
   if (e.request.method !== "GET") return;
+  // Ne garder hors ligne que la caisse elle-même, la bibliothèque Firebase et les polices.
+  // Les échanges en direct avec la base Firebase passent toujours par le réseau.
+  const u = new URL(e.request.url);
+  const garder = u.origin === self.location.origin || u.hostname === "www.gstatic.com" || u.hostname === "fonts.googleapis.com" || u.hostname === "fonts.gstatic.com";
+  if (!garder) return;
   e.respondWith(
     caches.match(e.request, { ignoreSearch: true }).then(cached => {
       const net = fetch(e.request)

@@ -248,82 +248,199 @@ const denLabel=c=>c>=100?(c/100)+" €":c+" c";
 function normCount(o){const r={};if(o&&typeof o==="object")DENOMS.forEach(d=>{const q=Math.round(+o[d]||0);if(q>0)r[d]=q});return r}
 const countTotal=o=>DENOMS.reduce((s,d)=>s+d*(o[d]||0),0);
 function normCaisses(o){const r={};if(o&&typeof o==="object")Object.keys(o).forEach(k=>{if(!/^\d{4}-\d{2}-\d{2}$/.test(k))return;const x=o[k]||{};r[k]={fond:Math.max(0,Math.round(+x.fond||0)),fondDetail:normCount(x.fondDetail),cloture:x.cloture&&typeof x.cloture==="object"?{compte:Math.max(0,Math.round(+x.cloture.compte||0)),detail:normCount(x.cloture.detail),attendu:Math.round(+x.cloture.attendu||0),ts:+x.cloture.ts||0}:null}});return r}
-function normMvts(a){return Array.isArray(a)?a.filter(m=>m&&m.id&&m.pid&&/^\d{4}-\d{2}-\d{2}$/.test(m.jour)).map(m=>({id:String(m.id),ts:+m.ts||0,jour:m.jour,pid:String(m.pid),nom:String(m.nom||""),refSage:String(m.refSage||""),qte:Math.round(+m.qte||0),type:m.type==="ajustement"?"ajustement":"reassort"})).slice(-3000):[]}
-function logMvt(p,qte,type){const now=new Date();config.mouvements.push({id:uid(),ts:now.getTime(),jour:dayKey(now),pid:p.id,nom:p.nom,refSage:p.refSage||"",qte,type})}
+/* ===== Synchronisation Firebase : à remplir avec la configuration du projet ===== */
+const FIREBASE_CONFIG={
+  apiKey:"AIzaSyCVwWEuzKOxkDf_5pM7ZYs1YJbttX-n0AY",
+  authDomain:"caisse-comptoir360.firebaseapp.com",
+  projectId:"caisse-comptoir360",
+  storageBucket:"caisse-comptoir360.firebasestorage.app",
+  messagingSenderId:"260181874588",
+  appId:"1:260181874588:web:f5cb44d447e221e7275a59"
+};
+const FIREBASE_VERSION="13.2.0";
+
+const MIG_TS=Date.now();
+function normMvt(m){if(!m||!m.id||!m.pid||!/^\d{4}-\d{2}-\d{2}$/.test(m.jour))return null;return{id:String(m.id),ts:+m.ts||0,jour:m.jour,pid:String(m.pid),nom:String(m.nom||""),refSage:String(m.refSage||""),qte:Math.round(+m.qte||0),type:m.type==="ajustement"?"ajustement":"reassort"}}
+function normProduit(p){
+  const hasBase=p.stockBase!==undefined;
+  const base=hasBase?(p.stockBase==null?null:Math.round(+p.stockBase)):(p.stock==null||p.stock===""||!isFinite(+p.stock)?null:Math.round(+p.stock));
+  return{id:String(p.id),nom:String(p.nom||"Produit"),prix:Math.max(0,Math.round(+p.prix||0)),couleur:/^#[0-9a-fA-F]{6}$/.test(p.couleur)?p.couleur:COLORS[1],cat:CATS.includes(p.cat)?p.cat:"Autres",
+    stockBase:base,stockTs:hasBase?(+p.stockTs||0):(base==null?0:MIG_TS),stock:base,refSage:String(p.refSage||"").slice(0,40)};
+}
 function normalizeConfig(c){
   c=c||{};
-  return{produits:Array.isArray(c.produits)?c.produits.filter(p=>p&&p.id).map(p=>({id:String(p.id),nom:String(p.nom||"Produit"),prix:Math.max(0,Math.round(+p.prix||0)),couleur:/^#[0-9a-fA-F]{6}$/.test(p.couleur)?p.couleur:COLORS[1],cat:CATS.includes(p.cat)?p.cat:"Autres",stock:p.stock==null||p.stock===""||!isFinite(+p.stock)?null:Math.round(+p.stock),refSage:String(p.refSage||"").slice(0,40)})):[],dernierTicket:Math.max(0,Math.round(+c.dernierTicket||0)),caisses:normCaisses(c.caisses),mouvements:normMvts(c.mouvements)};
+  return{produits:Array.isArray(c.produits)?c.produits.filter(p=>p&&p.id).map(normProduit):[],dernierTicket:Math.max(0,Math.round(+c.dernierTicket||0)),caisses:normCaisses(c.caisses)};
 }
 
-let config=normalizeConfig(LS.get("c360_config",null));
+const rawConfig=LS.get("c360_config",null);
+let config=normalizeConfig(rawConfig);
 let ventes=LS.get("c360_ventes",{});
 let pending=LS.get("c360_pending",[]);
 let pendingDel=LS.get("c360_pendingDel",[]);
 let configDirty=LS.get("c360_cfgDirty",false);
+/* mouvements de stock (réassorts, ajustements) : un document par mouvement */
+let mvts=LS.get("c360_mvts",null),pendMv=LS.get("c360_pendMv",[]),pendMvDel=LS.get("c360_pendMvDel",[]);
+if(!mvts){mvts={};((rawConfig&&rawConfig.mouvements)||[]).forEach(m=>{const x=normMvt(m);if(x){mvts[x.id]=x;pendMv.push(x.id)}})}
+function logMvt(p,qte,type){const now=new Date(),m={id:uid(),ts:now.getTime(),jour:dayKey(now),pid:p.id,nom:p.nom,refSage:p.refSage||"",qte,type};mvts[m.id]=m;if(!pendMv.includes(m.id))pendMv.push(m.id);saveLocal()}
+function delMvt(id){delete mvts[id];pendMv=pendMv.filter(x=>x!==id);if(!pendMvDel.includes(id))pendMvDel.push(id);saveLocal()}
+
+/* stock = stock de départ + réassorts/ajustements − ventes faites après ce départ (juste même avec plusieurs appareils) */
+function recomputeStock(){
+  const sold={},mv={};
+  config.produits.forEach(p=>{sold[p.id]=0;mv[p.id]=0});
+  Object.values(ventes).forEach(v=>{if(!v||!v.items)return;v.items.forEach(i=>{const p=i.pid&&config.produits.find(x=>x.id===i.pid);if(p&&p.stockBase!=null&&(+v.ts||0)>p.stockTs)sold[p.id]+=i.qte})});
+  Object.values(mvts).forEach(m=>{const p=config.produits.find(x=>x.id===m.pid);if(p&&p.stockBase!=null&&m.ts>p.stockTs)mv[p.id]+=m.qte});
+  config.produits.forEach(p=>{p.stock=p.stockBase==null?null:p.stockBase+mv[p.id]-sold[p.id]});
+}
+function setStockBase(p,n){p.stockBase=n;p.stockTs=Date.now();}
+
+/* numéro de ticket : une lettre par appareil quand la synchronisation est active */
+let appareil=LS.get("c360_appareil","");
+const ticketTxt=v=>v&&v.numero?(v.appareil?v.appareil+"-":"")+String(v.numero).padStart(2,"0"):"—";
+
 let ticket=[],remiseObj=null;
 let editingSale=null;
 let attente=LS.get("c360_attente",[]); // tickets en attente (sur cet appareil)
 const saveAttente=()=>LS.set("c360_attente",attente);
 let editMode=false,cat="Tout",view="caisse",bilanJour="today";
-let db=null,dl=null,syncState="local";
+let db=null,dl=null,syncState="local",syncMode="local";
 
-function saveLocal(){LS.set("c360_config",config);LS.set("c360_ventes",ventes);LS.set("c360_pending",pending);LS.set("c360_pendingDel",pendingDel);LS.set("c360_cfgDirty",configDirty)}
+function saveLocal(){LS.set("c360_config",config);LS.set("c360_ventes",ventes);LS.set("c360_pending",pending);LS.set("c360_pendingDel",pendingDel);LS.set("c360_cfgDirty",configDirty);LS.set("c360_mvts",mvts);LS.set("c360_pendMv",pendMv);LS.set("c360_pendMvDel",pendMvDel)}
 
-/* ---------- synchronisation (version en ligne uniquement) ---------- */
+/* ---------- connexion Firebase (même interface que la base claude.ai) ---------- */
+async function firebaseDb(cfg,cle){
+  const app=await import(`https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}/firebase-app.js`);
+  const fs=await import(`https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}/firebase-firestore.js`);
+  const f=fs.getFirestore(app.initializeApp(cfg));
+  const root="caisses/"+cle;
+  const snap=s=>({id:s.id,exists:s.exists(),data:()=>s.data(),metadata:s.metadata});
+  const ref=path=>{const r=fs.doc(f,root+"/"+path);return{
+    set:d=>fs.setDoc(r,JSON.parse(JSON.stringify(d))),
+    delete:()=>fs.deleteDoc(r),
+    onSnapshot:(n,e)=>fs.onSnapshot(r,{includeMetadataChanges:true},s=>n(snap(s)),e)}};
+  return{doc:ref,collection:c=>({doc:id=>ref(c+"/"+id),
+    onSnapshot:(n,e)=>fs.onSnapshot(fs.collection(f,root+"/"+c),{includeMetadataChanges:true},qs=>n({docs:qs.docs.map(snap),size:qs.size,metadata:qs.metadata}),e)})};
+}
+const withTimeout=(pr,ms)=>Promise.race([pr,new Promise((_,rej)=>setTimeout(()=>rej({code:"timeout"}),ms))]);
+
+/* ---------- synchronisation ---------- */
+function nPending(){return pending.length+pendingDel.length+pendMv.length+pendMvDel.length+(configDirty?1:0)}
 function renderSync(){
-  const n=pending.length+pendingDel.length+(configDirty?1:0);
-  const t={local:"Enregistré sur cet appareil",connecting:"Connexion…",slow:"Hors ligne – données gardées ici",ok:"Synchronisé",pending:`${n} envoi(s) en attente`,error:"Hors ligne – données gardées ici",readonly:"Lecture seule – données gardées ici"}[syncState]||"";
-  $("#sync").textContent=t;
+  const n=nPending();
+  const t={local:"Enregistré sur cet appareil",connecting:"Connexion…",slow:n?`Hors ligne – ${n} envoi(s) en attente`:"Hors ligne – données gardées ici",ok:"Synchronisé",pending:`${n} envoi(s) en attente`,error:"Hors ligne – données gardées ici",readonly:"Lecture seule – données gardées ici",refused:"Code de synchronisation refusé"}[syncState]||"";
+  $("#sync").textContent=(appareil&&syncMode==="firebase"?"Appareil "+appareil+" · ":"")+t;
   $("#sdot").className="dot"+(syncState==="ok"?" ok":syncState==="pending"||syncState==="connecting"?" wait":"");
 }
-function settle(){if(["local","error","readonly","connecting"].includes(syncState))return;syncState=(pending.length||pendingDel.length||configDirty)?"pending":"ok";renderSync()}
+function settle(){if(["local","error","readonly","connecting","refused","slow"].includes(syncState))return;syncState=nPending()?"pending":"ok";renderSync()}
 let flushing=false,cfgTimer=null;
 async function flush(){
-  if(!db||flushing||syncState==="readonly")return;flushing=true;
+  if(!db||flushing||syncState==="readonly"||syncState==="refused")return;flushing=true;
+  const T=pr=>withTimeout(pr,15000);
+  let ok=true;
+  const fail=e=>{ok=false;if(e&&e.code==="invalid_argument")syncState="readonly";if(e&&e.code==="permission-denied")syncState="refused"};
   try{
     for(const id of [...pending]){
       const v=ventes[id];
       if(!v){pending=pending.filter(x=>x!==id);continue}
-      try{await db.collection("ventes").doc(id).set(v);pending=pending.filter(x=>x!==id);saveLocal()}
-      catch(e){if(e&&e.code==="invalid_argument")syncState="readonly";break}
+      try{await T(db.collection("ventes").doc(id).set(v));pending=pending.filter(x=>x!==id);saveLocal()}catch(e){fail(e);break}
     }
-    for(const id of [...pendingDel]){
-      try{await db.collection("ventes").doc(id).delete();pendingDel=pendingDel.filter(x=>x!==id);saveLocal()}catch(e){break}
+    if(ok)for(const id of [...pendingDel]){
+      try{await T(db.collection("ventes").doc(id).delete());pendingDel=pendingDel.filter(x=>x!==id);saveLocal()}catch(e){fail(e);break}
     }
-    if(configDirty){
-      try{await db.doc("caisse/config").set(JSON.parse(JSON.stringify(config)));configDirty=false;saveLocal()}catch(e){if(e&&e.code==="invalid_argument")syncState="readonly"}
+    if(ok)for(const id of [...pendMv]){
+      const m=mvts[id];
+      if(!m){pendMv=pendMv.filter(x=>x!==id);continue}
+      try{await T(db.collection("mouvements").doc(id).set(m));pendMv=pendMv.filter(x=>x!==id);saveLocal()}catch(e){fail(e);break}
     }
+    if(ok)for(const id of [...pendMvDel]){
+      try{await T(db.collection("mouvements").doc(id).delete());pendMvDel=pendMvDel.filter(x=>x!==id);saveLocal()}catch(e){fail(e);break}
+    }
+    if(ok&&configDirty){
+      try{const c=JSON.parse(JSON.stringify(config));c.produits.forEach(p=>delete p.stock);await T(db.doc("caisse/config").set(c));configDirty=false;saveLocal()}catch(e){fail(e)}
+    }
+    if(ok&&(syncState==="slow"||syncState==="error"))syncState="ok";
   }finally{flushing=false;settle();renderSync()}
 }
 function pushConfig(){configDirty=true;saveLocal();renderSync();clearTimeout(cfgTimer);cfgTimer=setTimeout(flush,700)}
 
+function mergeCollection(qs,getLocal,pend,pendDel){
+  const server={};qs.docs.forEach(d=>{server[d.id]=JSON.parse(JSON.stringify(d.data()))});
+  const local=getLocal();
+  if(!qs.metadata.fromCache){
+    pend.forEach(id=>{if(local[id])server[id]=local[id]});
+    pendDel.forEach(id=>{delete server[id]});
+    return server;
+  }
+  const out={...local,...server};pendDel.forEach(id=>{delete out[id]});return out;
+}
+
 async function initDb(){
   const C=typeof claude!=="undefined"&&claude&&claude.use?claude:null;
-  if(C){try{db=await C.use("db")}catch(e){db=null}try{dl=await C.use("downloads")}catch(e){dl=null}}
+  if(C){try{dl=await C.use("downloads")}catch(e){dl=null}}
+  const cle=LS.get("c360_synckey","");
+  if(FIREBASE_CONFIG&&cle){
+    syncState="connecting";renderSync();
+    try{db=await firebaseDb(FIREBASE_CONFIG,cle);syncMode="firebase"}catch(e){db=null;syncState="slow";syncMode="firebase";renderSync()}
+  }
+  if(!db&&C&&syncMode!=="firebase"){try{db=await C.use("db");if(db)syncMode="claude"}catch(e){db=null}}
   if(view==="bilan")renderBilan();
-  if(!db){syncState="local";renderSync();return}
+  if(!db){if(syncMode!=="firebase")syncState="local";renderSync();return}
   syncState="connecting";renderSync();
   const timer=setTimeout(()=>{if(syncState==="connecting"){syncState="slow";renderSync()}},10000);
+  const onErr=e=>{syncState=e&&e.code==="permission-denied"?"refused":"error";renderSync()};
+  const online=()=>{clearTimeout(timer);if(syncState==="connecting"||syncState==="slow"||syncState==="error")syncState="ok"};
   let cfgChecked=false;
   db.doc("caisse/config").onSnapshot(snap=>{
-    if(!snap.metadata.fromCache)clearTimeout(timer);
+    if(!snap.metadata.fromCache)online();
     if(snap.exists){if(!configDirty){config=normalizeConfig(JSON.parse(JSON.stringify(snap.data())));saveLocal();renderAll()}}
     else if(!snap.metadata.fromCache&&!cfgChecked&&config.produits.length){pushConfig()}
     if(!snap.metadata.fromCache)cfgChecked=true;
-  },()=>{syncState="error";renderSync()});
+    settle();
+  },onErr);
   db.collection("ventes").onSnapshot(qs=>{
-    const server={};qs.docs.forEach(d=>{server[d.id]=JSON.parse(JSON.stringify(d.data()))});
-    if(!qs.metadata.fromCache){
-      clearTimeout(timer);
-      if(syncState==="connecting"||syncState==="slow")syncState="ok";
-      pending.forEach(id=>{if(ventes[id])server[id]=ventes[id]});
-      pendingDel.forEach(id=>{delete server[id]});
-      ventes=server;
-    }else{Object.assign(ventes,server);pendingDel.forEach(id=>{delete ventes[id]})}
-    saveLocal();settle();renderSync();if(view==="bilan")renderBilan();
-  },()=>{syncState="error";renderSync()});
+    if(!qs.metadata.fromCache)online();
+    ventes=mergeCollection(qs,()=>ventes,pending,pendingDel);
+    saveLocal();settle();renderAll();
+  },onErr);
+  db.collection("mouvements").onSnapshot(qs=>{
+    if(!qs.metadata.fromCache)online();
+    const m=mergeCollection(qs,()=>mvts,pendMv,pendMvDel);mvts={};Object.values(m).forEach(x=>{const y=normMvt(x);if(y)mvts[y.id]=y});
+    saveLocal();settle();renderAll();
+  },onErr);
   flush();setInterval(flush,15000);
   window.addEventListener("online",flush);
+}
+
+/* active la synchronisation sur cet appareil */
+function enableSync(cle,lettre){
+  LS.set("c360_synckey",cle);LS.set("c360_appareil",lettre);appareil=lettre;
+  Object.keys(ventes).forEach(id=>{if(!pending.includes(id))pending.push(id)});
+  Object.keys(mvts).forEach(id=>{if(!pendMv.includes(id))pendMv.push(id)});
+  configDirty=false;saveLocal();location.reload(); // les produits ne sont envoyés que si la base en ligne est vide
+}
+function syncCard(){
+  if(!FIREBASE_CONFIG)return"";
+  const cle=LS.get("c360_synckey","");
+  return`<div class="card" style="margin-top:14px"><h3>Synchronisation entre appareils</h3>
+    ${cle?`<p style="margin:0 0 6px;font-weight:600">Active sur cet appareil (lettre <b>${esc(appareil||"?")}</b>) · ${esc($("#sync").textContent)}</p>
+      <p class="muted" style="margin:0 0 10px;font-size:14px">Les ventes, le stock, les produits et le fond de caisse se mettent à jour tout seuls entre vos appareils dès qu'ils ont du réseau.</p>
+      <div class="exports" style="margin-top:0"><button class="btn line" id="syncnow">Synchroniser maintenant</button><button class="btn line" id="syncoff">Désactiver sur cet appareil</button></div>`
+    :`<p class="muted" style="margin:0 0 10px;font-size:14px">Entrez le code de synchronisation (le même sur tous vos appareils) et une lettre pour cet appareil : T pour la tablette, P pour le téléphone… Elle apparaîtra devant les numéros de ticket (T-01, P-01).</p>
+      <div class="field" style="margin-top:0"><label>Code de synchronisation</label><input id="sk" autocapitalize="characters" autocomplete="off" placeholder="C360-…"></div>
+      <div class="field"><label>Lettre de cet appareil</label><input id="sl" maxlength="2" autocapitalize="characters" autocomplete="off" placeholder="T" style="width:90px;text-align:center"></div>
+      <p class="err" id="serr"></p>
+      <button class="btn dark" id="syncon">Activer la synchronisation</button>`}
+  </div>`;
+}
+function bindSyncCard(w){
+  const on=w.querySelector("#syncon");if(on)on.onclick=()=>{
+    const k=w.querySelector("#sk").value.trim(),l=w.querySelector("#sl").value.trim().toUpperCase();
+    if(!/^[A-Za-z0-9-]{12,60}$/.test(k)){w.querySelector("#serr").textContent="Code incomplet : recopiez-le exactement.";return}
+    if(!/^[A-Z]{1,2}$/.test(l)){w.querySelector("#serr").textContent="Choisissez une lettre, par exemple T ou P.";return}
+    confirmBox(`Activer la synchronisation sur cet appareil (lettre ${l}) ? Ses ventes et produits seront envoyés aux autres appareils.`,"Activer",()=>enableSync(k,l));
+  };
+  const now=w.querySelector("#syncnow");if(now)now.onclick=()=>{flush();toast("Synchronisation lancée")};
+  const off=w.querySelector("#syncoff");if(off)off.onclick=()=>confirmBox("Désactiver la synchronisation sur cet appareil ? Les données restent sur l'appareil.","Désactiver",()=>{LS.set("c360_synckey","");location.reload()});
 }
 
 /* ---------- caisse ---------- */
@@ -345,9 +462,10 @@ function stockTag(p){
   return`<span class="stk ${reste<=SEUIL?"low":""}">Stock ${reste}</span>`;
 }
 function renderGrid(){
+  recomputeStock();
   $("#editbar").hidden=!editMode;
   $("#fixbar").hidden=!editingSale||editMode;
-  if(editingSale)$("#fixtxt").textContent=`Correction du ticket n° ${numTxt(editingSale.numero)} : modifiez les articles puis touchez « Valider la correction ».`;
+  if(editingSale)$("#fixtxt").textContent=`Correction du ticket n° ${ticketTxt(editingSale)} : modifiez les articles puis touchez « Valider la correction ».`;
   $("#ebtn").classList.toggle("on",editMode);
   const list=config.produits.filter(p=>cat==="Tout"||p.cat===cat);
   const qty={};ticket.forEach(l=>{if(l.pid)qty[l.pid]=(qty[l.pid]||0)+l.qte});
@@ -408,7 +526,7 @@ $("#tlist").onclick=e=>{
 $("#thead").onclick=()=>{$("#ticket").classList.toggle("open");renderTicket()};
 $("#holdbar").onclick=openAttente;
 $("#paybtn").onclick=()=>{if(!editingSale&&!config.caisses[dayKey()])openFond(openPay);else openPay()};
-$("#fixcancel").onclick=()=>confirmBox(`Abandonner la correction ? Le ticket n° ${numTxt(editingSale&&editingSale.numero)} reste tel qu'il était.`,"Abandonner",()=>{editingSale=null;ticket=[];remiseObj=null;renderAll();toast("Ticket inchangé")});
+$("#fixcancel").onclick=()=>confirmBox(`Abandonner la correction ? Le ticket n° ${ticketTxt(editingSale)} reste tel qu'il était.`,"Abandonner",()=>{editingSale=null;ticket=[];remiseObj=null;renderAll();toast("Ticket inchangé")});
 $("#ebtn").onclick=()=>{editMode=!editMode;renderAll()};
 $("#edone").onclick=()=>{editMode=false;renderAll()};
 $("#ereass").onclick=()=>openReassort();
@@ -494,30 +612,29 @@ function openCash(tot){
   });
 }
 function nextTicketNumber(){
-  const maxVentes=Object.values(ventes).reduce((m,v)=>Math.max(m,+v.numero||0),0);
-  const n=Math.max(maxVentes,config.dernierTicket||0,LS.get("c360_dernierTicket",0))+1;
-  config.dernierTicket=n;LS.set("c360_dernierTicket",n);
+  const mine=Object.values(ventes).filter(v=>(v.appareil||"")===appareil).reduce((m,v)=>Math.max(m,+v.numero||0),0);
+  const key="c360_ctr_"+(appareil||"_");
+  const legacy=appareil?0:Math.max(config.dernierTicket||0,LS.get("c360_dernierTicket",0));
+  const n=Math.max(mine,LS.get(key,0),legacy)+1;
+  LS.set(key,n);if(!appareil){config.dernierTicket=n;LS.set("c360_dernierTicket",n)}
   return n;
 }
-const numTxt=n=>n?String(n).padStart(2,"0"):"—";
 function finishSale(paiement,recu){
   const t=totals();if(!ticket.length)return;
   const now=new Date(),E=editingSale;
   const id=E?E.id:uid();
   const numero=E?E.numero:nextTicketNumber();
-  const v={id,numero,ts:E?E.ts:now.getTime(),jour:E?E.jour:dayKey(now),heure:E?E.heure:now.getHours(),...(E?{corrige:now.getTime()}:{}),
+  const v={id,numero,appareil:E?(E.appareil||""):appareil,ts:E?E.ts:now.getTime(),jour:E?E.jour:dayKey(now),heure:E?E.heure:now.getHours(),...(E?{corrige:now.getTime()}:{}),
     items:ticket.map(l=>{const p=l.pid&&config.produits.find(x=>x.id===l.pid);return{pid:l.pid||null,nom:l.nom,prix:l.prix,qte:l.qte,cat:l.cat,refSage:p&&p.refSage||""}}),
     sousTotal:t.sub,remise:t.rem,total:t.tot,paiement,recu:recu??null,rendu:recu!=null?recu-t.tot:null};
-  if(E)E.items.forEach(i=>{const p=i.pid&&config.produits.find(x=>x.id===i.pid);if(p&&p.stock!=null)p.stock+=i.qte});
   editingSale=null;
   ventes[id]=v;if(!pending.includes(id))pending.push(id);pendingDel=pendingDel.filter(x=>x!==id);
-  let stockChange=false;v.items.forEach(i=>{const p=i.pid&&config.produits.find(x=>x.id===i.pid);if(p&&p.stock!=null){p.stock-=i.qte;stockChange=true}});
   saveLocal();pushConfig();
   ticket=[];remiseObj=null;$("#ticket").classList.remove("open");renderAll();
   settle();flush();
   const r=v.rendu>0;
   openModal(`<div class="success"><div class="check"><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div>
-    <h2 class="mt">Ticket n° ${numTxt(v.numero)}</h2><div class="big">${eur(v.total)}</div><p class="sub">${PAY[v.paiement]} · ${E?"ticket corrigé":"vente enregistrée"}</p>
+    <h2 class="mt">Ticket n° ${ticketTxt(v)}</h2><div class="big">${eur(v.total)}</div><p class="sub">${PAY[v.paiement]} · ${E?"ticket corrigé":"vente enregistrée"}</p>
     ${r?`<div class="rendu">Monnaie à rendre<div class="big">${eur(v.rendu)}</div></div>`:""}
     <div class="two"><button class="btn" id="sfix">Corriger</button><button class="btn primary" data-close>Client suivant</button></div></div>`,s=>{
       let keep=false;s.addEventListener("pointerdown",()=>{keep=true});
@@ -543,8 +660,8 @@ function openQty(i){
   openNumber(`Quantité · ${l.nom}`,`${eur(l.prix)} l'unité. Tapez 0 pour retirer l'article.`,l.qte,n=>{if(n<=0)ticket.splice(i,1);else l.qte=n;renderGrid();renderTicket()});
 }
 function openStockSet(id){
-  const p=config.produits.find(x=>x.id===id);if(!p)return;
-  openNumber(`Stock · ${p.nom}`,`Stock actuel : ${p.stock??"non suivi"}. Tapez le nombre d'articles réellement présents.`,p.stock??0,n=>{const d=n-(p.stock??0);p.stock=n;if(d)logMvt(p,d,"ajustement");pushConfig();renderBilan();renderGrid();toast("Stock mis à jour")},"Enregistrer");
+  recomputeStock();const p=config.produits.find(x=>x.id===id);if(!p)return;
+  openNumber(`Stock · ${p.nom}`,`Stock actuel : ${p.stock??"non suivi"}. Tapez le nombre d'articles réellement présents.`,p.stock??0,n=>{setStockBase(p,n);pushConfig();renderBilan();renderGrid();toast("Stock mis à jour")},"Enregistrer");
 }
 
 /* ---------- tickets en attente ---------- */
@@ -579,7 +696,7 @@ function openAttente(){
 /* ---------- correction d'un ticket ---------- */
 function openSaleFix(id){
   const v=ventes[id];if(!v)return;
-  openModal(`<h2 class="mt">Ticket n° ${numTxt(v.numero)}</h2>
+  openModal(`<h2 class="mt">Ticket n° ${ticketTxt(v)}</h2>
     <p class="sub">${esc(dayLabel(v.jour))} à ${new Date(v.ts).toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"})} · ${PAY[v.paiement]} · <b style="color:var(--ink)">${eur(v.total)}</b></p>
     <div class="card" style="padding:10px 12px">${v.items.map(i=>`<div class="bar" style="grid-template-columns:1fr auto"><span class="nm">${i.qte} × ${esc(i.nom)}</span><span class="vv">${eur(i.qte*i.prix)}</span></div>`).join("")}${v.remise?`<div class="bar" style="grid-template-columns:1fr auto"><span class="nm">Remise</span><span class="vv">−${eur(v.remise)}</span></div>`:""}</div>
     <p class="sub" style="margin-top:16px">Changer le mode de règlement</p>
@@ -589,9 +706,9 @@ function openSaleFix(id){
     <button class="btn" data-close style="margin-top:10px">Fermer</button>`,s=>{
     s.querySelectorAll("[data-np]").forEach(b=>b.onclick=()=>{
       const m=b.dataset.np;
-      confirmBox(`Passer le ticket n° ${numTxt(v.numero)} de ${PAY[v.paiement]} à ${PAY[m]} ?`,"Confirmer",()=>{
+      confirmBox(`Passer le ticket n° ${ticketTxt(v)} de ${PAY[v.paiement]} à ${PAY[m]} ?`,"Confirmer",()=>{
         ventes[id]={...v,paiement:m,recu:null,rendu:null,corrige:Date.now()};
-        if(!pending.includes(id))pending.push(id);saveLocal();settle();flush();renderAll();toast(`Ticket n° ${numTxt(v.numero)} : ${PAY[m]}`);
+        if(!pending.includes(id))pending.push(id);saveLocal();settle();flush();renderAll();toast(`Ticket n° ${ticketTxt(v)} : ${PAY[m]}`);
       });
     });
     s.querySelector("#fxitems").onclick=()=>{
@@ -601,15 +718,14 @@ function openSaleFix(id){
   });
 }
 function startFix(v){
-  editingSale={id:v.id,numero:v.numero,ts:v.ts,jour:v.jour,heure:v.heure,items:v.items.map(i=>({...i}))};
+  editingSale={id:v.id,numero:v.numero,appareil:v.appareil||"",ts:v.ts,jour:v.jour,heure:v.heure,items:v.items.map(i=>({...i}))};
   ticket=v.items.map(i=>({pid:i.pid,nom:i.nom,prix:i.prix,cat:i.cat,qte:i.qte}));
   remiseObj=v.remise?{eur:v.remise}:null;
   closeModal();view="caisse";editMode=false;$("#ticket").classList.add("open");renderAll();
 }
 function cancelSale(id){
   const v=ventes[id];if(!v)return;
-  confirmBox(`Annuler le ticket n° ${numTxt(v.numero)} (${eur(v.total)}) ? Les articles reviennent en stock.`,"Annuler le ticket",()=>{
-    v.items.forEach(i=>{const p=i.pid&&config.produits.find(x=>x.id===i.pid);if(p&&p.stock!=null)p.stock+=i.qte});pushConfig();
+  confirmBox(`Annuler le ticket n° ${ticketTxt(v)} (${eur(v.total)}) ? Les articles reviennent en stock.`,"Annuler le ticket",()=>{
     delete ventes[id];if(pending.includes(id))pending=pending.filter(x=>x!==id);else pendingDel.push(id);
     if(editingSale&&editingSale.id===id){editingSale=null;ticket=[];remiseObj=null}
     saveLocal();settle();flush();renderAll();toast("Ticket annulé");
@@ -646,7 +762,8 @@ function openEditor(p,keepCat){
       if(stRaw!==""&&(!isFinite(stock)||stock<0)){s.querySelector("#ferr").textContent="Le stock doit être un nombre entier, par exemple 12.";return false}
       if(!nom){s.querySelector("#ferr").textContent="Indiquez une désignation.";fn.focus();return false}
       if(isNaN(prix)||prix<0){s.querySelector("#ferr").textContent="Indiquez un prix, par exemple 12,50.";fp.focus();return false}
-      const np={...d,nom,prix,stock,refSage:s.querySelector("#fsage").value.trim()};
+      const np={...d,nom,prix,refSage:s.querySelector("#fsage").value.trim()};
+      if(stock==null){np.stockBase=null;np.stockTs=0;np.stock=null}else if(stock!==d.stock){np.stockBase=stock;np.stockTs=Date.now();np.stock=stock}
       const i=config.produits.findIndex(x=>x.id===np.id);
       if(i>=0)config.produits[i]=np;else config.produits.push(np);
       pushConfig();renderAll();return true;
@@ -721,6 +838,7 @@ function bars(rows,fmt){
   return rows.length?rows.map(r=>`<div class="bar"><span class="nm">${r.n}</span><span class="track"><span class="fill" style="width:${Math.max(3,r.v/max*100)}%"></span></span><span class="vv">${fmt(r)}</span></div>`).join(""):`<p class="muted" style="margin:0">Aucune donnée</p>`;
 }
 function renderBilan(){
+  recomputeStock();
   const all=Object.values(ventes).filter(v=>v&&v.id).sort((a,b)=>b.ts-a.ts);
   const today=dayKey();
   const sel=bilanJour==="all"?all:all.filter(v=>v.jour===(bilanJour==="today"?today:bilanJour));
@@ -752,20 +870,21 @@ function renderBilan(){
     </div>
     ${bilanJour!=="all"?`<div style="margin-top:10px">${caisseCard(bilanJour==="today"?today:bilanJour)}</div>`:""}
     ${stockCard()}
-    <div class="card" style="margin-top:10px"><h3>Détail des ventes</h3>${sel.length?sel.map(v=>`<div class="sale"><span class="t">${new Date(v.ts).toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"})}</span><span class="d"><b>${v.items.map(i=>`${i.qte} × ${esc(i.nom)}`).join(", ")}</b><br>Ticket n° ${numTxt(v.numero)}${v.corrige?`<span class="tag-mod">corrigé</span>`:""} · ${PAY[v.paiement]||esc(v.paiement)}${bilanJour==="all"?" · "+esc(dayLabel(v.jour)):""}${v.remise?` · remise ${eur(v.remise)}`:""}</span><span class="s">${eur(v.total)}</span><button class="del fx" data-fix="${esc(v.id)}">Corriger</button></div>`).join(""):`<p class="muted" style="margin:0">Aucune vente sur cette période.</p>`}</div>
+    <div class="card" style="margin-top:10px"><h3>Détail des ventes</h3>${sel.length?sel.map(v=>`<div class="sale"><span class="t">${new Date(v.ts).toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"})}</span><span class="d"><b>${v.items.map(i=>`${i.qte} × ${esc(i.nom)}`).join(", ")}</b><br>Ticket n° ${ticketTxt(v)}${v.corrige?`<span class="tag-mod">corrigé</span>`:""} · ${PAY[v.paiement]||esc(v.paiement)}${bilanJour==="all"?" · "+esc(dayLabel(v.jour)):""}${v.remise?` · remise ${eur(v.remise)}`:""}</span><span class="s">${eur(v.total)}</span><button class="del fx" data-fix="${esc(v.id)}">Corriger</button></div>`).join(""):`<p class="muted" style="margin:0">Aucune vente sur cette période.</p>`}</div>
     <div class="exports">
       <button class="btn dark" id="xsage" ${sel.length?"":"disabled"}>Export Sage (par jour et par règlement)</button>
       <button class="btn line" id="xcsv" ${sel.length?"":"disabled"}>Export détaillé (ticket par ticket)</button>
     </div>
+    ${syncCard()}
     <div class="card" style="margin-top:14px"><h3>Transférer vers un autre appareil</h3>
       <p class="muted" style="margin:0 0 10px;font-size:14px">Envoie toute la caisse (produits, stock, ventes, fond de caisse, tickets en attente) vers un autre téléphone ou une tablette, par AirDrop, même sans Internet. Sur l'autre appareil, touchez « Recevoir ».</p>
       <div class="exports" style="margin-top:0"><button class="btn dark" id="xsend">Envoyer la caisse</button><label class="btn line" style="display:flex;align-items:center;justify-content:center;cursor:pointer;flex:1;min-width:180px">Recevoir une caisse<input type="file" id="xrecv" accept=".json,application/json,text/plain" hidden></label></div>
     </div>
     <p class="muted" style="margin-top:14px;font-size:14px">${db?(syncState==="ok"?"Les ventes de tous les appareils connectés apparaissent ici.":"Les ventes sont gardées sur cet appareil et partiront dès le retour de la connexion."):"Les ventes sont enregistrées sur cet appareil, même sans Internet. Exportez le bilan en fin de journée."}</p>`;
-  const adj=(id,d)=>{const p=config.produits.find(x=>x.id===id);if(!p||p.stock==null)return;if(p.stock+d<0)return;p.stock+=d;logMvt(p,d,"ajustement");pushConfig();renderBilan();renderGrid()};
+  const adj=(id,d)=>{const p=config.produits.find(x=>x.id===id);if(!p||p.stock==null)return;if(p.stock+d<0)return;logMvt(p,d,"ajustement");settle();flush();renderBilan();renderGrid()};
   w.querySelectorAll("[data-sset]").forEach(b=>b.onclick=()=>openStockSet(b.dataset.sset));
   const br=w.querySelector("#breass");if(br)br.onclick=openReassort;
-  w.querySelectorAll("[data-mvdel]").forEach(b=>b.onclick=()=>{const m=config.mouvements.find(x=>x.id===b.dataset.mvdel);if(!m)return;confirmBox(`Annuler le réassort de ${m.qte} × ${m.nom} ?`,"Annuler le réassort",()=>{const p=config.produits.find(x=>x.id===m.pid);if(p&&p.stock!=null)p.stock=Math.max(0,p.stock-m.qte);config.mouvements=config.mouvements.filter(x=>x.id!==m.id);pushConfig();renderBilan();renderGrid();toast("Réassort annulé")})});
+  w.querySelectorAll("[data-mvdel]").forEach(b=>b.onclick=()=>{const m=mvts[b.dataset.mvdel];if(!m)return;confirmBox(`Annuler le réassort de ${m.qte} × ${m.nom} ?`,"Annuler le réassort",()=>{delMvt(m.id);settle();flush();renderBilan();renderGrid();toast("Réassort annulé")})});
   w.querySelectorAll("[data-sm]").forEach(b=>b.onclick=()=>adj(b.dataset.sm,-1));
   w.querySelectorAll("[data-sp]").forEach(b=>b.onclick=()=>adj(b.dataset.sp,1));
   const bf=w.querySelector("#bfond");if(bf)bf.onclick=()=>openFond(null);
@@ -773,6 +892,7 @@ function renderBilan(){
   w.querySelectorAll("[data-j]").forEach(b=>b.onclick=()=>{bilanJour=b.dataset.j;renderBilan()});
   w.querySelectorAll("[data-fix]").forEach(b=>b.onclick=()=>openSaleFix(b.dataset.fix));
   const per=bilanJour==="all"?"toutes":bilanJour==="today"?today:bilanJour;
+  bindSyncCard(w);
   $("#xsend").onclick=sendCaisse;
   $("#xrecv").onchange=e=>{const f=e.target.files&&e.target.files[0];e.target.value="";if(f)receiveCaisse(f)};
   $("#xsage").onclick=()=>exportFile(`sage-${per}.csv`,buildSageCsv(sel));
@@ -780,7 +900,7 @@ function renderBilan(){
 }
 /* ---------- transfert entre appareils ---------- */
 function sendCaisse(){
-  const data={app:"caisse-comptoir360",version:1,envoyeLe:Date.now(),config,ventes,attente,dernierTicket:Math.max(LS.get("c360_dernierTicket",0),config.dernierTicket||0)};
+  const data={app:"caisse-comptoir360",version:2,envoyeLe:Date.now(),config,ventes,mvts,attente,dernierTicket:Math.max(LS.get("c360_dernierTicket",0),config.dernierTicket||0)};
   const d=new Date(),stamp=dayKey(d)+"-"+String(d.getHours()).padStart(2,"0")+"h"+String(d.getMinutes()).padStart(2,"0");
   exportFile(`caisse-comptoir360-${stamp}.json`,JSON.stringify(data),"application/json",true);
 }
@@ -802,6 +922,8 @@ function receiveCaisse(file){
         nv.forEach(v=>{const cur=merged[v.id];if(!cur||(+v.corrige||0)>=(+cur.corrige||0))merged[v.id]=v});
         ventes=merged;
         config=normalizeConfig(d.config);
+        if(Array.isArray(d.config.mouvements))d.config.mouvements.forEach(m=>{const x=normMvt(m);if(x&&!mvts[x.id]){mvts[x.id]=x;pendMv.push(x.id)}});
+        if(d.mvts&&typeof d.mvts==="object")Object.values(d.mvts).forEach(m=>{const x=normMvt(m);if(x&&!mvts[x.id]){mvts[x.id]=x;pendMv.push(x.id)}});
         const hw=Math.max(+d.dernierTicket||0,config.dernierTicket||0,LS.get("c360_dernierTicket",0),...Object.values(ventes).map(v=>+v.numero||0));
         config.dernierTicket=hw;LS.set("c360_dernierTicket",hw);
         if(Array.isArray(d.attente))attente=d.attente.filter(a=>a&&a.id&&Array.isArray(a.items));saveAttente();
@@ -826,8 +948,8 @@ function stockCard(){
   const ps=config.produits.filter(p=>p.stock!=null).sort((a,b)=>a.stock-b.stock||a.nom.localeCompare(b.nom,"fr"));
   const vendu={},reass={};
   if(jour){Object.values(ventes).filter(v=>v&&v.jour===jour).forEach(v=>v.items.forEach(i=>{if(i.pid)vendu[i.pid]=(vendu[i.pid]||0)+i.qte}));
-    config.mouvements.filter(m=>m.jour===jour&&m.type==="reassort").forEach(m=>{reass[m.pid]=(reass[m.pid]||0)+m.qte})}
-  const mv=config.mouvements.filter(m=>m.type==="reassort"&&(!jour||m.jour===jour)).sort((a,b)=>b.ts-a.ts);
+    Object.values(mvts).filter(m=>m.jour===jour&&m.type==="reassort").forEach(m=>{reass[m.pid]=(reass[m.pid]||0)+m.qte})}
+  const mv=Object.values(mvts).filter(m=>m.type==="reassort"&&(!jour||m.jour===jour)).sort((a,b)=>b.ts-a.ts);
   const head=`<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px"><h3 style="margin:0">Stock</h3><button class="chip on" id="breass">+ Faire un réassort</button></div>`;
   if(!ps.length)return`<div class="card" style="margin-top:10px">${head}<p class="muted" style="margin:0">Aucun stock suivi. Dans Produits, touchez un produit et indiquez son stock, ou faites un réassort.</p></div>`;
   const val=ps.reduce((s,p)=>s+Math.max(0,p.stock)*p.prix,0);
@@ -839,6 +961,7 @@ function stockCard(){
   </div>`;
 }
 function openReassort(){
+  recomputeStock();
   const ps=[...config.produits].sort((a,b)=>((a.stock??999)-(b.stock??999))||a.nom.localeCompare(b.nom,"fr"));
   if(!ps.length){toast("Créez d'abord vos produits");return}
   const q={};
@@ -851,7 +974,7 @@ function openReassort(){
     s.querySelector("#rl").onclick=e=>{const b=e.target.closest("button");if(!b)return;buzz();const id=b.dataset.m||b.dataset.p;set(id,(q[id]||0)+(b.dataset.p?1:-1))};
     s.querySelector("#rl").oninput=e=>{const i=e.target.closest("[data-r]");if(!i)return;const v=parseInt(i.value.replace(/\D/g,""),10);if(v>0)q[i.dataset.r]=Math.min(9999,v);else delete q[i.dataset.r];upd()};
     s.querySelector("#rok").onclick=()=>{
-      Object.entries(q).forEach(([id,n])=>{const p=config.produits.find(x=>x.id===id);if(!p)return;p.stock=(p.stock??0)+n;logMvt(p,n,"reassort")});
+      let cfgCh=false;Object.entries(q).forEach(([id,n])=>{const p=config.produits.find(x=>x.id===id);if(!p)return;if(p.stockBase==null){p.stockBase=0;p.stockTs=Date.now()-1;cfgCh=true}logMvt(p,n,"reassort")});if(cfgCh)pushConfig();settle();flush();
       pushConfig();closeModal();renderAll();toast("Réassort enregistré");
     };
   });
@@ -873,7 +996,7 @@ function buildSageCsv(list){
     Object.keys(PAY).forEach(m=>{
       const vm=vj.filter(v=>v.paiement===m);if(!vm.length)return;
       const totM=vm.reduce((s,v)=>s+v.total,0),rem=vm.reduce((s,v)=>s+(v.remise||0),0);
-      const nums=vm.map(v=>+v.numero||0).filter(Boolean).sort((a,b)=>a-b);
+      const nums=vm.filter(v=>+v.numero).sort((a,b)=>a.ts-b.ts).map(ticketTxt);
       blank();
       rows.push([`RÈGLEMENT : ${PAY[m].toUpperCase()}`,"",`${vm.length} ticket(s)`,"",`${n(totM)} €`]);
       rows.push(["Code Sage","Désignation","Quantité","Prix unitaire TTC","Total TTC"]);
@@ -882,9 +1005,9 @@ function buildSageCsv(list){
       Object.values(g).sort((a,b)=>(a.ref||"zzz"+a.nom).localeCompare(b.ref||"zzz"+b.nom,"fr")).forEach(l=>{if(!l.ref)manque++;rows.push([l.ref||"⚠ À COMPLÉTER",l.nom,l.qte,n(l.prix),n(l.qte*l.prix)])});
       if(rem)rows.push(["","Remises accordées","","",n(-rem)]);
       rows.push(["",`TOTAL ${PAY[m].toUpperCase()}`,"","",n(totM)]);
-      if(nums.length)rows.push(["",`Tickets n° ${nums.map(x=>String(x).padStart(2,"0")).join(", ")}`]);
+      if(nums.length)rows.push(["",`Tickets n° ${nums.join(", ")}`]);
     });
-    const ra=config.mouvements.filter(m=>m.jour===j&&m.type==="reassort");
+    const ra=Object.values(mvts).filter(m=>m.jour===j&&m.type==="reassort");
     if(ra.length){
       blank();rows.push(["RÉASSORTS (entrées en stock)"]);rows.push(["Code Sage","Désignation","Quantité ajoutée","Heure"]);
       const gr={};ra.forEach(m=>{const p=!m.refSage&&config.produits.find(x=>x.id===m.pid);const ref=m.refSage||(p&&p.refSage)||"";const k=m.pid;gr[k]=gr[k]||{ref,nom:m.nom,qte:0,h:[]};gr[k].qte+=m.qte;gr[k].h.push(new Date(m.ts).toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"}))});
@@ -902,7 +1025,7 @@ function buildCsv(list){
   const n=c=>(c/100).toFixed(2).replace(".",",");
   const q=s=>`"${String(s??"").replace(/"/g,'""')}"`;
   const rows=[["N° ticket","Date","Heure","Paiement","Réf. Sage","Produit","Rayon","Quantité","Prix unitaire","Total ligne","Remise ticket","Total ticket"]];
-  [...list].sort((a,b)=>a.ts-b.ts).forEach(v=>{const d=new Date(v.ts);v.items.forEach((i,k)=>{const p=!i.refSage&&i.pid&&config.produits.find(x=>x.id===i.pid);rows.push([`="${numTxt(v.numero)}"`,d.toLocaleDateString("fr-FR"),d.toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"}),PAY[v.paiement]||v.paiement,i.refSage||(p&&p.refSage)||"",i.nom,i.cat,i.qte,n(i.prix),n(i.prix*i.qte),k===0?n(v.remise||0):"",k===0?n(v.total):""])})});
+  [...list].sort((a,b)=>a.ts-b.ts).forEach(v=>{const d=new Date(v.ts);v.items.forEach((i,k)=>{const p=!i.refSage&&i.pid&&config.produits.find(x=>x.id===i.pid);rows.push([`="${ticketTxt(v)}"`,d.toLocaleDateString("fr-FR"),d.toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"}),PAY[v.paiement]||v.paiement,i.refSage||(p&&p.refSage)||"",i.nom,i.cat,i.qte,n(i.prix),n(i.prix*i.qte),k===0?n(v.remise||0):"",k===0?n(v.total):""])})});
   return rows.map(r=>r.map(q).join(";")).join("\r\n");
 }
 function showCsv(text){
