@@ -1,5 +1,5 @@
 // Caisse Comptoir 360 – fonctionnement hors connexion
-const CACHE = "caisse-c360-v20";
+const CACHE = "caisse-c360-v21";
 const FILES = ["./", "./index.html"];
 const EXTRAS = ["./manifest.webmanifest", "./icon-180.png", "./icon-192.png", "./icon-512.png"];
 
