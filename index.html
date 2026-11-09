@@ -897,7 +897,7 @@ function renderBilan(){
     <div class="exports">
       <button class="btn dark" id="xsage" ${sel.length?"":"disabled"}>Export Sage (par jour et par règlement)</button>
       <button class="btn line" id="xcsv" ${sel.length?"":"disabled"}>Export détaillé (ticket par ticket)</button>
-      ${config.produits.some(p=>p.stockBase!=null)?`<button class="btn line" id="xstock2">Export des stocks</button>`:""}
+      <button class="btn line" id="xstock2" ${config.produits.length?"":"disabled"}>Export des stocks</button>
     </div>
     ${syncCard()}
     <div class="card" style="margin-top:14px"><h3>Transférer vers un autre appareil</h3>
@@ -1009,7 +1009,8 @@ function periodBounds(){
 function stockRecap(){
   recomputeStock();
   const{start,end}=periodBounds();const now=Date.now();
-  return config.produits.filter(p=>p.stockBase!=null).map(p=>{
+  return config.produits.map(p=>{
+    if(p.stockBase==null)return{p,debut:null,vendu:Object.values(ventes).reduce((s,v)=>s+((v&&v.items&&(+v.ts||0)>=start&&(+v.ts||0)<=end)?v.items.filter(i=>i.pid===p.id).reduce((a,i)=>a+i.qte,0):0),0),reass:0,ajust:0,fin:null};
     let vendu=0,reass=0,ajust=0,apresV=0,apresM=0;
     Object.values(ventes).forEach(v=>{if(!v||!v.items)return;const t=+v.ts||0;if(t<=p.stockTs)return;v.items.forEach(i=>{if(i.pid!==p.id)return;if(t>=start&&t<=end)vendu+=i.qte;else if(t>end)apresV+=i.qte})});
     Object.values(mvts).forEach(m=>{if(m.pid!==p.id||m.ts<=p.stockTs)return;if(m.ts>=start&&m.ts<=end){if(m.type==="reassort")reass+=m.qte;else ajust+=m.qte}else if(m.ts>end)apresM+=m.qte});
@@ -1020,13 +1021,14 @@ function stockRecap(){
 }
 function stockRecapCard(){
   const rows=stockRecap();if(!rows.length)return"";
-  const tot=k=>rows.reduce((s,r)=>s+r[k],0);
+  const tot=k=>rows.reduce((s,r)=>s+(r[k]||0),0);const nt=rows.filter(r=>r.fin==null).length;
   const valA=rows.reduce((s,r)=>s+(r.p.pa!=null?Math.max(0,r.fin)*r.p.pa:0),0);
   return`<div class="card" style="margin-top:10px"><h3>Récapitulatif des stocks</h3>
     <div style="overflow-x:auto"><table class="rtab"><thead><tr><th>Produit</th><th>Départ</th><th>Vendus</th><th>Réassort</th><th>Restant</th></tr></thead><tbody>
-    ${rows.map(r=>`<tr><td>${esc(r.p.nom)}<small>${esc(r.p.cat)}${r.ajust?` · ajust. ${r.ajust>0?"+":""}${r.ajust}`:""}</small></td><td>${r.debut}</td><td>${r.vendu?"−"+r.vendu:"0"}</td><td>${r.reass?"+"+r.reass:"0"}</td><td class="${r.fin<=0?"out":r.fin<=SEUIL?"low":""}"><b>${r.fin}</b></td></tr>`).join("")}
+    ${rows.map(r=>`<tr><td>${esc(r.p.nom)}<small>${esc(r.p.cat)}${r.ajust?` · ajust. ${r.ajust>0?"+":""}${r.ajust}`:""}</small></td><td>${r.debut??"—"}</td><td>${r.vendu?"−"+r.vendu:"0"}</td><td>${r.reass?"+"+r.reass:"0"}</td><td class="${r.fin==null?"":r.fin<=0?"out":r.fin<=SEUIL?"low":""}"><b>${r.fin??"—"}</b></td></tr>`).join("")}
     <tr class="tot"><td>Total</td><td>${tot("debut")}</td><td>${tot("vendu")?"−"+tot("vendu"):"0"}</td><td>${tot("reass")?"+"+tot("reass"):"0"}</td><td>${tot("fin")}</td></tr>
     </tbody></table></div>
+    ${nt?`<p style="margin:8px 0 0;color:#b45309;font-weight:600;font-size:14px">${nt} produit(s) sans stock indiqué (—) : touchez Produits, puis le produit, et remplissez « Stock disponible ».</p>`:""}
     ${valA?`<p class="muted" style="margin:8px 0 0;font-size:14px">Valeur du stock restant au prix d'achat : <b style="color:var(--ink)">${eur(Math.round(valA))} HT</b></p>`:""}
     <button class="btn line" id="xstock" style="margin-top:10px">Exporter le récapitulatif des stocks (Excel)</button>
   </div>`;
@@ -1038,9 +1040,10 @@ function buildStockCsv(){
   const rows=[[`RÉCAPITULATIF DES STOCKS – Comptoir 360 – ${lab}`],[`Édité le ${new Date().toLocaleString("fr-FR")}`],[],
     ["Code Sage","Produit","Rayon","Stock de départ","Vendus","Réassorts","Ajustements","Stock restant","Prix d'achat HT","Valeur restante achat HT","Prix de vente TTC","Valeur restante vente TTC","À réapprovisionner"]];
   const rs=stockRecap();let vA=0,vV=0;
-  rs.forEach(r=>{const a=r.p.pa!=null?Math.max(0,r.fin)*r.p.pa:null,v=Math.max(0,r.fin)*r.p.prix;if(a!=null)vA+=a;vV+=v;
+  rs.forEach(r=>{if(r.fin==null){rows.push([r.p.refSage||"",r.p.nom,r.p.cat,"non suivi",r.vendu,"","","non suivi",r.p.pa!=null?n(r.p.pa):"","",n(r.p.prix),"",""]);return}
+    const a=r.p.pa!=null?Math.max(0,r.fin)*r.p.pa:null,v=Math.max(0,r.fin)*r.p.prix;if(a!=null)vA+=a;vV+=v;
     rows.push([r.p.refSage||"",r.p.nom,r.p.cat,r.debut,r.vendu,r.reass,r.ajust,r.fin,r.p.pa!=null?n(r.p.pa):"",a!=null?n(a):"",n(r.p.prix),n(v),r.fin<=SEUIL?"OUI":""])});
-  const t=k=>rs.reduce((s,r)=>s+r[k],0);
+  const t=k=>rs.reduce((s,r)=>s+(r[k]||0),0);
   rows.push(["","TOTAL","",t("debut"),t("vendu"),t("reass"),t("ajust"),t("fin"),"",n(vA),"",n(vV),""]);
   return rows.map(r=>r.map(q).join(";")).join("\r\n");
 }
