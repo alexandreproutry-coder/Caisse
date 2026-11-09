@@ -164,6 +164,13 @@ header{flex:none;display:flex;align-items:center;gap:8px;padding:0 12px;height:6
 .sale .del{color:var(--warn);font-weight:600;font-size:13px;padding:4px 6px;border-radius:6px;background:#fef2f2}
 .sale .del.fx{color:#1e3a8a;background:#eff6ff;padding:6px 10px}
 .muted{color:var(--muted)}
+.rtab{width:100%;border-collapse:collapse;font-size:14px}
+.rtab th{text-align:right;font-weight:600;color:var(--muted);padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+.rtab th:first-child,.rtab td:first-child{text-align:left}
+.rtab td{text-align:right;padding:8px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
+.rtab td small{display:block;color:var(--muted);font-size:12px}
+.rtab td.low b{color:#b45309}.rtab td.out b{color:var(--warn)}
+.rtab tr.tot td{font-weight:700;border-bottom:0}
 .retrait{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
 .retrait>div{border-radius:10px;padding:10px 12px;background:#f0fdf4;color:var(--ok)}
 .retrait>div+div{background:#eff6ff;color:#1e3a8a}
@@ -265,7 +272,8 @@ function normProduit(p){
   const hasBase=p.stockBase!==undefined;
   const base=hasBase?(p.stockBase==null?null:Math.round(+p.stockBase)):(p.stock==null||p.stock===""||!isFinite(+p.stock)?null:Math.round(+p.stock));
   return{id:String(p.id),nom:String(p.nom||"Produit"),prix:Math.max(0,Math.round(+p.prix||0)),couleur:/^#[0-9a-fA-F]{6}$/.test(p.couleur)?p.couleur:COLORS[1],cat:CATS.includes(p.cat)?p.cat:"Autres",
-    stockBase:base,stockTs:hasBase?(+p.stockTs||0):(base==null?0:MIG_TS),stock:base,refSage:String(p.refSage||"").slice(0,40)};
+    stockBase:base,stockTs:hasBase?(+p.stockTs||0):(base==null?0:MIG_TS),stock:base,refSage:String(p.refSage||"").slice(0,40),
+    pa:p.pa==null||p.pa===""||!isFinite(+p.pa)?null:Math.max(0,Math.round(+p.pa)),tva:[20,10,5.5,2.1,0].includes(+p.tva)?+p.tva:20};
 }
 function normalizeConfig(c){
   c=c||{};
@@ -625,7 +633,7 @@ function finishSale(paiement,recu){
   const id=E?E.id:uid();
   const numero=E?E.numero:nextTicketNumber();
   const v={id,numero,appareil:E?(E.appareil||""):appareil,ts:E?E.ts:now.getTime(),jour:E?E.jour:dayKey(now),heure:E?E.heure:now.getHours(),...(E?{corrige:now.getTime()}:{}),
-    items:ticket.map(l=>{const p=l.pid&&config.produits.find(x=>x.id===l.pid);return{pid:l.pid||null,nom:l.nom,prix:l.prix,qte:l.qte,cat:l.cat,refSage:p&&p.refSage||""}}),
+    items:ticket.map(l=>{const p=l.pid&&config.produits.find(x=>x.id===l.pid);return{pid:l.pid||null,nom:l.nom,prix:l.prix,qte:l.qte,cat:l.cat,refSage:p&&p.refSage||"",pa:p&&p.pa!=null?p.pa:null,tva:p?p.tva:20}}),
     sousTotal:t.sub,remise:t.rem,total:t.tot,paiement,recu:recu??null,rendu:recu!=null?recu-t.tot:null};
   editingSale=null;
   ventes[id]=v;if(!pending.includes(id))pending.push(id);pendingDel=pendingDel.filter(x=>x!==id);
@@ -744,6 +752,8 @@ function openEditor(p,keepCat){
     <div class="field"><label>Prix de vente TTC (€)</label><input id="fp" inputmode="decimal" placeholder="ex : 29,90" value="${p?esc((p.prix/100).toFixed(2).replace(".",",")):""}"></div>
     <div class="field"><label>Rayon</label><div class="chips" id="fc">${CATS.map(c=>`<button class="chip ${c===d.cat?"on":""}" data-c="${esc(c)}">${esc(c)}</button>`).join("")}</div></div>
     <div class="field"><label>Couleur de la touche</label><div class="swatches" id="fs">${COLORS.map(c=>`<button class="sw ${c===d.couleur?"on":""}" style="background:${c}" data-s="${c}"></button>`).join("")}<label class="sw custom ${COLORS.includes(d.couleur)?"":"on"}" title="Autre couleur"><input type="color" id="fcol" value="${esc(d.couleur)}"></label></div></div>
+    <div class="field"><label>Prix d'achat HT (€) <span class="muted" style="font-weight:500">(facultatif, pour la marge, jamais affiché aux clients)</span></label><input id="fpa" inputmode="decimal" placeholder="ex : 18,50" value="${d.pa!=null?esc((d.pa/100).toFixed(2).replace(".",",")):""}"></div>
+    <div class="field"><label>TVA</label><div class="chips" id="ftva">${[20,10,5.5].map(t=>`<button class="chip ${(d.tva??20)===t?"on":""}" data-tva="${t}">${String(t).replace(".",",")} %</button>`).join("")}</div></div>
     <div class="field"><label>Référence Sage <span class="muted" style="font-weight:500">(visible seulement dans l'export Excel)</span></label><input id="fsage" maxlength="40" autocapitalize="characters" autocomplete="off" placeholder="ex : RHUM-VX-70" value="${esc(d.refSage||"")}"></div>
     <div class="field"><label>Stock disponible <span class="muted" style="font-weight:500">(facultatif)</span></label><input id="fst" inputmode="numeric" placeholder="Laisser vide pour ne pas suivre le stock" value="${d.stock!=null?d.stock:""}"></div>
     <p class="err" id="ferr"></p>
@@ -753,6 +763,7 @@ function openEditor(p,keepCat){
     const pv=()=>{const pr=parseEur(fp.value);s.querySelector("#pv").innerHTML=`<div class="tile" style="--c:${esc(d.couleur)}"><span class="nom">${esc(fn.value||"Désignation")}</span><span class="prix">${isNaN(pr)?"— €":eur(pr)}</span></div>`};
     s.querySelector("#fst").oninput=pv;
     fn.oninput=pv;fp.oninput=pv;
+    s.querySelector("#ftva").onclick=e=>{const b=e.target.closest("[data-tva]");if(!b)return;d.tva=+b.dataset.tva;s.querySelectorAll("#ftva .chip").forEach(x=>x.classList.toggle("on",x===b))};
     s.querySelector("#fc").onclick=e=>{const b=e.target.closest("[data-c]");if(!b)return;d.cat=b.dataset.c;s.querySelectorAll("#fc .chip").forEach(x=>x.classList.toggle("on",x===b));if(isNew){d.couleur=CATCOL[d.cat]||d.couleur;s.querySelectorAll("#fs .sw").forEach(x=>x.classList.toggle("on",x.dataset.s===d.couleur));s.querySelector("#fcol").value=d.couleur;pv()}};
     s.querySelector("#fs").onclick=e=>{const b=e.target.closest("[data-s]");if(!b)return;d.couleur=b.dataset.s;s.querySelectorAll("#fs .sw").forEach(x=>x.classList.toggle("on",x===b));pv()};
     s.querySelector("#fcol").oninput=e=>{d.couleur=e.target.value;s.querySelectorAll("#fs .sw").forEach(x=>x.classList.toggle("on",x.classList.contains("custom")));pv()};
@@ -762,7 +773,9 @@ function openEditor(p,keepCat){
       if(stRaw!==""&&(!isFinite(stock)||stock<0)){s.querySelector("#ferr").textContent="Le stock doit être un nombre entier, par exemple 12.";return false}
       if(!nom){s.querySelector("#ferr").textContent="Indiquez une désignation.";fn.focus();return false}
       if(isNaN(prix)||prix<0){s.querySelector("#ferr").textContent="Indiquez un prix, par exemple 12,50.";fp.focus();return false}
-      const np={...d,nom,prix,refSage:s.querySelector("#fsage").value.trim()};
+      const paRaw=s.querySelector("#fpa").value.trim(),pa=paRaw===""?null:parseEur(paRaw);
+      if(paRaw!==""&&(isNaN(pa)||pa<0)){s.querySelector("#ferr").textContent="Prix d'achat invalide, par exemple 18,50.";return false}
+      const np={...d,nom,prix,pa,tva:d.tva??20,refSage:s.querySelector("#fsage").value.trim()};
       if(stock==null){np.stockBase=null;np.stockTs=0;np.stock=null}else if(stock!==d.stock){np.stockBase=stock;np.stockTs=Date.now();np.stock=stock}
       const i=config.produits.findIndex(x=>x.id===np.id);
       if(i>=0)config.produits[i]=np;else config.produits.push(np);
@@ -837,11 +850,18 @@ function bars(rows,fmt){
   const max=Math.max(1,...rows.map(r=>r.v));
   return rows.length?rows.map(r=>`<div class="bar"><span class="nm">${r.n}</span><span class="track"><span class="fill" style="width:${Math.max(3,r.v/max*100)}%"></span></span><span class="vv">${fmt(r)}</span></div>`).join(""):`<p class="muted" style="margin:0">Aucune donnée</p>`;
 }
+function weekendDays(){
+  const d=new Date();d.setHours(12,0,0,0);
+  while(d.getDay()!==0)d.setDate(d.getDate()-1); // dimanche le plus récent (aujourd'hui si dimanche)
+  const sun=dayKey(d);d.setDate(d.getDate()-1);const sat=dayKey(d);
+  return[sat,sun];
+}
+function bilanDays(){const t=dayKey();if(bilanJour==="all")return null;if(bilanJour==="weekend")return weekendDays();return[bilanJour==="today"?t:bilanJour]}
 function renderBilan(){
   recomputeStock();
   const all=Object.values(ventes).filter(v=>v&&v.id).sort((a,b)=>b.ts-a.ts);
   const today=dayKey();
-  const sel=bilanJour==="all"?all:all.filter(v=>v.jour===(bilanJour==="today"?today:bilanJour));
+  const jd=bilanDays();const sel=jd?all.filter(v=>jd.includes(v.jour)):all;
   const jours=[...new Set(all.map(v=>v.jour))].filter(j=>j!==today).sort().reverse();
   const ca=sel.reduce((s,v)=>s+v.total,0),nb=sel.length;
   const art=sel.reduce((s,v)=>s+v.items.reduce((a,i)=>a+i.qte,0),0);
@@ -850,11 +870,12 @@ function renderBilan(){
   const byP={};sel.forEach(v=>v.items.forEach(i=>{byP[i.nom]=byP[i.nom]||{n:esc(i.nom),q:0,v:0};byP[i.nom].q+=i.qte;byP[i.nom].v+=i.qte*i.prix}));
   const byCat={};sel.forEach(v=>v.items.forEach(i=>{byCat[i.cat]=(byCat[i.cat]||0)+i.qte*i.prix}));
   const byH={};sel.forEach(v=>{const h=v.heure??new Date(v.ts).getHours();byH[h]=(byH[h]||0)+v.total});
-  const label=bilanJour==="all"?"Toutes les ventes":bilanJour==="today"?"Aujourd'hui":dayLabel(bilanJour);
+  const wk=weekendDays();
+  const label=bilanJour==="all"?"Toutes les ventes":bilanJour==="today"?"Aujourd'hui":bilanJour==="weekend"?`Week-end du ${dayLabel(wk[0])} au ${dayLabel(wk[1])}`:dayLabel(bilanJour);
   const w=$("#bwrap");
   w.innerHTML=`
     <h2>Bilan · ${esc(label)}</h2>
-    <div class="chips"><button class="chip ${bilanJour==="today"?"on":""}" data-j="today">Aujourd'hui</button>${jours.map(j=>`<button class="chip ${bilanJour===j?"on":""}" data-j="${j}">${esc(dayLabel(j))}</button>`).join("")}<button class="chip ${bilanJour==="all"?"on":""}" data-j="all">Tout</button></div>
+    <div class="chips"><button class="chip ${bilanJour==="today"?"on":""}" data-j="today">Aujourd'hui</button><button class="chip ${bilanJour==="weekend"?"on":""}" data-j="weekend">Week-end</button>${jours.map(j=>`<button class="chip ${bilanJour===j?"on":""}" data-j="${j}">${esc(dayLabel(j))}</button>`).join("")}<button class="chip ${bilanJour==="all"?"on":""}" data-j="all">Tout</button></div>
     <div class="kpis">
       <div class="kpi main"><div class="l">Chiffre d'affaires TTC</div><div class="v">${eur(ca)}</div></div>
       <div class="kpi"><div class="l">Ventes</div><div class="v">${nb}</div></div>
@@ -868,12 +889,15 @@ function renderBilan(){
       <div class="card"><h3>Par rayon</h3>${bars(Object.entries(byCat).sort((a,b)=>b[1]-a[1]).map(([k,v])=>({n:esc(k),v})),r=>eur(r.v))}</div>
       <div class="card"><h3>Par heure</h3>${bars(Object.keys(byH).map(Number).sort((a,b)=>a-b).map(h=>({n:`${h} h – ${h+1} h`,v:byH[h]})),r=>eur(r.v))}</div>
     </div>
-    ${bilanJour!=="all"?`<div style="margin-top:10px">${caisseCard(bilanJour==="today"?today:bilanJour)}</div>`:""}
+    ${bilanJour!=="all"&&bilanJour!=="weekend"?`<div style="margin-top:10px">${caisseCard(bilanJour==="today"?today:bilanJour)}</div>`:""}
+    ${margeCard(sel)}
+    ${stockRecapCard()}
     ${stockCard()}
     <div class="card" style="margin-top:10px"><h3>Détail des ventes</h3>${sel.length?sel.map(v=>`<div class="sale"><span class="t">${new Date(v.ts).toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"})}</span><span class="d"><b>${v.items.map(i=>`${i.qte} × ${esc(i.nom)}`).join(", ")}</b><br>Ticket n° ${ticketTxt(v)}${v.corrige?`<span class="tag-mod">corrigé</span>`:""} · ${PAY[v.paiement]||esc(v.paiement)}${bilanJour==="all"?" · "+esc(dayLabel(v.jour)):""}${v.remise?` · remise ${eur(v.remise)}`:""}</span><span class="s">${eur(v.total)}</span><button class="del fx" data-fix="${esc(v.id)}">Corriger</button></div>`).join(""):`<p class="muted" style="margin:0">Aucune vente sur cette période.</p>`}</div>
     <div class="exports">
       <button class="btn dark" id="xsage" ${sel.length?"":"disabled"}>Export Sage (par jour et par règlement)</button>
       <button class="btn line" id="xcsv" ${sel.length?"":"disabled"}>Export détaillé (ticket par ticket)</button>
+      ${config.produits.some(p=>p.stockBase!=null)?`<button class="btn line" id="xstock2">Export des stocks</button>`:""}
     </div>
     ${syncCard()}
     <div class="card" style="margin-top:14px"><h3>Transférer vers un autre appareil</h3>
@@ -891,12 +915,14 @@ function renderBilan(){
   const bc=w.querySelector("#bclot");if(bc)bc.onclick=()=>openCloture(bilanJour==="today"?today:bilanJour);
   w.querySelectorAll("[data-j]").forEach(b=>b.onclick=()=>{bilanJour=b.dataset.j;renderBilan()});
   w.querySelectorAll("[data-fix]").forEach(b=>b.onclick=()=>openSaleFix(b.dataset.fix));
-  const per=bilanJour==="all"?"toutes":bilanJour==="today"?today:bilanJour;
+  const per=bilanJour==="all"?"toutes":bilanJour==="today"?today:bilanJour==="weekend"?"weekend-"+wk[0]:bilanJour;
   bindSyncCard(w);
   $("#xsend").onclick=sendCaisse;
   $("#xrecv").onchange=e=>{const f=e.target.files&&e.target.files[0];e.target.value="";if(f)receiveCaisse(f)};
   $("#xsage").onclick=()=>exportFile(`sage-${per}.csv`,buildSageCsv(sel));
   $("#xcsv").onclick=()=>exportFile(`ventes-detail-${per}.csv`,buildCsv(sel));
+  const xs2=w.querySelector("#xstock2");if(xs2)xs2.onclick=()=>exportFile(`stocks-${per}.csv`,buildStockCsv());
+  const xs=w.querySelector("#xstock");if(xs)xs.onclick=()=>exportFile(`stocks-${per}.csv`,buildStockCsv());
 }
 /* ---------- transfert entre appareils ---------- */
 function sendCaisse(){
@@ -943,8 +969,83 @@ async function exportFile(name,body,type,noBom){
   try{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([text],{type}));a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},2000);return}catch(e){}
   showCsv(body);
 }
+function lineMargin(v,i){
+  const p=i.pid&&config.produits.find(x=>x.id===i.pid);
+  const pa=i.pa!=null?i.pa:(p&&p.pa!=null?p.pa:null);
+  const tva=i.tva!=null?+i.tva:(p?p.tva:20);
+  const share=v.sousTotal?Math.max(0,1-(v.remise||0)/v.sousTotal):1;
+  const ht=i.prix*i.qte*share/(1+tva/100);
+  return{ht,achat:pa==null?null:pa*i.qte,marge:pa==null?null:ht-pa*i.qte};
+}
+function margeCard(sel){
+  let ht=0,achat=0,marge=0,sans=0,htTot=0;const byP={},byC={};
+  sel.forEach(v=>v.items.forEach(i=>{const m=lineMargin(v,i);htTot+=m.ht;if(m.marge==null){sans++;return}
+    ht+=m.ht;achat+=m.achat;marge+=m.marge;
+    const k=i.nom;byP[k]=byP[k]||{n:esc(i.nom),v:0,q:0,ht:0};byP[k].v+=m.marge;byP[k].q+=i.qte;byP[k].ht+=m.ht;
+    byC[i.cat]=byC[i.cat]||{n:esc(i.cat),v:0,ht:0};byC[i.cat].v+=m.marge;byC[i.cat].ht+=m.ht}));
+  const r=x=>Math.round(x);const pct=(a,b)=>b>0?(a/b*100).toFixed(1).replace(".",",")+" %":"—";
+  if(!sel.length)return"";
+  if(!ht&&sans)return`<div class="card" style="margin-top:10px"><h3>Marge</h3><p class="muted" style="margin:0">Indiquez le prix d'achat HT de vos produits (Produits → touchez un produit) pour calculer la marge.</p></div>`;
+  return`<div class="card" style="margin-top:10px"><h3>Marge</h3>
+    <div class="kpis" style="margin:4px 0 10px">
+      <div class="kpi main"><div class="l">Marge HT</div><div class="v">${eur(r(marge))}</div></div>
+      <div class="kpi"><div class="l">Taux de marque (sur vente)</div><div class="v">${pct(marge,ht)}</div></div>
+      <div class="kpi"><div class="l">Taux de marge (sur achat)</div><div class="v">${pct(marge,achat)}</div></div>
+      <div class="kpi"><div class="l">CA HT · Achats HT</div><div class="v" style="font-size:18px">${eur(r(ht))} · ${eur(r(achat))}</div></div>
+    </div>
+    <p class="muted" style="margin:0 0 4px;font-size:14px">Par produit (marge HT)</p>
+    ${bars(Object.values(byP).sort((a,b)=>b.v-a.v).slice(0,10).map(x=>({n:x.n,v:Math.max(0,x.v),m:x.v,q:x.q,ht:x.ht})),x=>`${eur(r(x.m))} <span class="muted">(${pct(x.m,x.ht)})</span>`)}
+    <p class="muted" style="margin:10px 0 4px;font-size:14px">Par rayon</p>
+    ${bars(Object.values(byC).sort((a,b)=>b.v-a.v).map(x=>({n:x.n,v:Math.max(0,x.v),m:x.v,ht:x.ht})),x=>`${eur(r(x.m))} <span class="muted">(${pct(x.m,x.ht)})</span>`)}
+    ${sans?`<p style="margin:10px 0 0;color:var(--warn);font-weight:600;font-size:14px">${sans} ligne(s) vendue(s) sans prix d'achat : non comptées. Complétez le prix d'achat dans la fiche produit.</p>`:""}
+    <p class="muted" style="margin:8px 0 0;font-size:12px">Calcul HT à partir du prix de vente TTC et de la TVA de chaque produit, remises déduites.</p>
+  </div>`;
+}
+function periodBounds(){
+  const jd=bilanDays();if(!jd)return{start:-Infinity,end:Infinity,label:"toutes les ventes"};
+  const s=[...jd].sort(),a=s[0].split("-").map(Number),b=s[s.length-1].split("-").map(Number);
+  return{start:new Date(a[0],a[1]-1,a[2]).getTime(),end:new Date(b[0],b[1]-1,b[2]+1).getTime()-1};
+}
+function stockRecap(){
+  recomputeStock();
+  const{start,end}=periodBounds();const now=Date.now();
+  return config.produits.filter(p=>p.stockBase!=null).map(p=>{
+    let vendu=0,reass=0,ajust=0,apresV=0,apresM=0;
+    Object.values(ventes).forEach(v=>{if(!v||!v.items)return;const t=+v.ts||0;if(t<=p.stockTs)return;v.items.forEach(i=>{if(i.pid!==p.id)return;if(t>=start&&t<=end)vendu+=i.qte;else if(t>end)apresV+=i.qte})});
+    Object.values(mvts).forEach(m=>{if(m.pid!==p.id||m.ts<=p.stockTs)return;if(m.ts>=start&&m.ts<=end){if(m.type==="reassort")reass+=m.qte;else ajust+=m.qte}else if(m.ts>end)apresM+=m.qte});
+    const fin=end>=now?p.stock:p.stock-apresM+apresV;
+    const debut=fin-reass-ajust+vendu;
+    return{p,debut,vendu,reass,ajust,fin};
+  }).sort((a,b)=>a.p.cat.localeCompare(b.p.cat,"fr")||a.p.nom.localeCompare(b.p.nom,"fr"));
+}
+function stockRecapCard(){
+  const rows=stockRecap();if(!rows.length)return"";
+  const tot=k=>rows.reduce((s,r)=>s+r[k],0);
+  const valA=rows.reduce((s,r)=>s+(r.p.pa!=null?Math.max(0,r.fin)*r.p.pa:0),0);
+  return`<div class="card" style="margin-top:10px"><h3>Récapitulatif des stocks</h3>
+    <div style="overflow-x:auto"><table class="rtab"><thead><tr><th>Produit</th><th>Départ</th><th>Vendus</th><th>Réassort</th><th>Restant</th></tr></thead><tbody>
+    ${rows.map(r=>`<tr><td>${esc(r.p.nom)}<small>${esc(r.p.cat)}${r.ajust?` · ajust. ${r.ajust>0?"+":""}${r.ajust}`:""}</small></td><td>${r.debut}</td><td>${r.vendu?"−"+r.vendu:"0"}</td><td>${r.reass?"+"+r.reass:"0"}</td><td class="${r.fin<=0?"out":r.fin<=SEUIL?"low":""}"><b>${r.fin}</b></td></tr>`).join("")}
+    <tr class="tot"><td>Total</td><td>${tot("debut")}</td><td>${tot("vendu")?"−"+tot("vendu"):"0"}</td><td>${tot("reass")?"+"+tot("reass"):"0"}</td><td>${tot("fin")}</td></tr>
+    </tbody></table></div>
+    ${valA?`<p class="muted" style="margin:8px 0 0;font-size:14px">Valeur du stock restant au prix d'achat : <b style="color:var(--ink)">${eur(Math.round(valA))} HT</b></p>`:""}
+    <button class="btn line" id="xstock" style="margin-top:10px">Exporter le récapitulatif des stocks (Excel)</button>
+  </div>`;
+}
+function buildStockCsv(){
+  const n=c=>(c/100).toFixed(2).replace(".",",");
+  const q=s=>`"${String(s??"").replace(/"/g,'""')}"`;
+  const jd=bilanDays();const lab=jd?(jd.length>1?`du ${dayLabel(jd[0])} au ${dayLabel(jd[jd.length-1])}`:`du ${dayLabel(jd[0])}`):"(toutes les ventes)";
+  const rows=[[`RÉCAPITULATIF DES STOCKS – Comptoir 360 – ${lab}`],[`Édité le ${new Date().toLocaleString("fr-FR")}`],[],
+    ["Code Sage","Produit","Rayon","Stock de départ","Vendus","Réassorts","Ajustements","Stock restant","Prix d'achat HT","Valeur restante achat HT","Prix de vente TTC","Valeur restante vente TTC","À réapprovisionner"]];
+  const rs=stockRecap();let vA=0,vV=0;
+  rs.forEach(r=>{const a=r.p.pa!=null?Math.max(0,r.fin)*r.p.pa:null,v=Math.max(0,r.fin)*r.p.prix;if(a!=null)vA+=a;vV+=v;
+    rows.push([r.p.refSage||"",r.p.nom,r.p.cat,r.debut,r.vendu,r.reass,r.ajust,r.fin,r.p.pa!=null?n(r.p.pa):"",a!=null?n(a):"",n(r.p.prix),n(v),r.fin<=SEUIL?"OUI":""])});
+  const t=k=>rs.reduce((s,r)=>s+r[k],0);
+  rows.push(["","TOTAL","",t("debut"),t("vendu"),t("reass"),t("ajust"),t("fin"),"",n(vA),"",n(vV),""]);
+  return rows.map(r=>r.map(q).join(";")).join("\r\n");
+}
 function stockCard(){
-  const jour=bilanJour==="all"?null:(bilanJour==="today"?dayKey():bilanJour);
+  const jour=bilanJour==="all"||bilanJour==="weekend"?null:(bilanJour==="today"?dayKey():bilanJour);
   const ps=config.produits.filter(p=>p.stock!=null).sort((a,b)=>a.stock-b.stock||a.nom.localeCompare(b.nom,"fr"));
   const vendu={},reass={};
   if(jour){Object.values(ventes).filter(v=>v&&v.jour===jour).forEach(v=>v.items.forEach(i=>{if(i.pid)vendu[i.pid]=(vendu[i.pid]||0)+i.qte}));
@@ -989,6 +1090,29 @@ function buildSageCsv(list){
   rows.push(["RÉCAPITULATIF POUR SAISIE SAGE – Comptoir 360"]);
   rows.push([jours.length?`Période : ${longDay(jours[0])}${jours.length>1?" au "+longDay(jours[jours.length-1]):""}`:""]);
   let manque=0,grand=0;
+  if(jours.length){
+    blank();rows.push(["SYNTHÈSE DES ENCAISSEMENTS (à rapprocher des remises en banque)"]);
+    rows.push(["Jour","Espèces","Carte bancaire (remise CB)","Chèques","Total du jour","Nb tickets"]);
+    const tot={especes:0,carte:0,cheque:0};
+    jours.forEach(j=>{const vj=list.filter(v=>v.jour===j);const s={especes:0,carte:0,cheque:0};vj.forEach(v=>{if(s[v.paiement]!=null)s[v.paiement]+=v.total});Object.keys(s).forEach(k=>tot[k]+=s[k]);
+      rows.push([longDay(j),n(s.especes),n(s.carte),n(s.cheque),n(s.especes+s.carte+s.cheque),vj.length])});
+    if(jours.length>1)rows.push(["TOTAL",n(tot.especes),n(tot.carte),n(tot.cheque),n(tot.especes+tot.carte+tot.cheque),list.length]);
+    const cb=list.filter(v=>v.paiement==="carte").sort((a,b)=>a.ts-b.ts);
+    if(cb.length){
+      blank();rows.push(["DÉTAIL DES PAIEMENTS PAR CARTE (à pointer avec les tickets CB du TPE)"]);rows.push(["Jour","Heure","N° ticket","Montant"]);
+      let jPrev=null,sJ=0;
+      const sousTotal=()=>{if(jPrev)rows.push(["",`Total carte ${longDay(jPrev)}`,"",n(sJ)])};
+      cb.forEach(v=>{if(v.jour!==jPrev){sousTotal();jPrev=v.jour;sJ=0}sJ+=v.total;rows.push([longDay(v.jour),new Date(v.ts).toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"}),ticketTxt(v),n(v.total)])});
+      sousTotal();
+    }
+    const chq=list.filter(v=>v.paiement==="cheque").sort((a,b)=>a.ts-b.ts);
+    if(chq.length){
+      blank();rows.push(["DÉTAIL DES CHÈQUES (pour la remise de chèques)"]);rows.push(["Jour","Heure","N° ticket","Montant"]);
+      chq.forEach(v=>{const d=new Date(v.ts);rows.push([longDay(v.jour),d.toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"}),ticketTxt(v),n(v.total)])});
+      rows.push(["","","Total chèques",n(chq.reduce((s,v)=>s+v.total,0))]);
+    }
+    blank();rows.push(["DÉTAIL PAR JOUR, PAR RÈGLEMENT ET PAR CODE SAGE"]);
+  }
   jours.forEach(j=>{
     const vj=list.filter(v=>v.jour===j);const totJ=vj.reduce((s,v)=>s+v.total,0);grand+=totJ;
     blank();blank();
@@ -1024,8 +1148,8 @@ function buildSageCsv(list){
 function buildCsv(list){
   const n=c=>(c/100).toFixed(2).replace(".",",");
   const q=s=>`"${String(s??"").replace(/"/g,'""')}"`;
-  const rows=[["N° ticket","Date","Heure","Paiement","Réf. Sage","Produit","Rayon","Quantité","Prix unitaire","Total ligne","Remise ticket","Total ticket"]];
-  [...list].sort((a,b)=>a.ts-b.ts).forEach(v=>{const d=new Date(v.ts);v.items.forEach((i,k)=>{const p=!i.refSage&&i.pid&&config.produits.find(x=>x.id===i.pid);rows.push([`="${ticketTxt(v)}"`,d.toLocaleDateString("fr-FR"),d.toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"}),PAY[v.paiement]||v.paiement,i.refSage||(p&&p.refSage)||"",i.nom,i.cat,i.qte,n(i.prix),n(i.prix*i.qte),k===0?n(v.remise||0):"",k===0?n(v.total):""])})});
+  const rows=[["N° ticket","Date","Heure","Paiement","Réf. Sage","Produit","Rayon","Quantité","Prix unitaire TTC","Total ligne TTC","Remise ticket","Total ticket","TVA","Vente HT (remise déduite)","Prix d'achat HT","Achat HT","Marge HT"]];
+  [...list].sort((a,b)=>a.ts-b.ts).forEach(v=>{const d=new Date(v.ts);v.items.forEach((i,k)=>{const p=!i.refSage&&i.pid&&config.produits.find(x=>x.id===i.pid);rows.push([`="${ticketTxt(v)}"`,d.toLocaleDateString("fr-FR"),d.toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"}),PAY[v.paiement]||v.paiement,i.refSage||(p&&p.refSage)||"",i.nom,i.cat,i.qte,n(i.prix),n(i.prix*i.qte),k===0?n(v.remise||0):"",k===0?n(v.total):"",...(()=>{const m=lineMargin(v,i);const pa=m.achat==null?null:m.achat/i.qte;const tv=i.tva!=null?i.tva:((config.produits.find(x=>x.id===i.pid)||{}).tva??20);return[String(tv).replace(".",",")+" %",n(Math.round(m.ht)),pa==null?"":n(Math.round(pa)),m.achat==null?"":n(Math.round(m.achat)),m.marge==null?"à compléter":n(Math.round(m.marge))]})()])})});
   return rows.map(r=>r.map(q).join(";")).join("\r\n");
 }
 function showCsv(text){
